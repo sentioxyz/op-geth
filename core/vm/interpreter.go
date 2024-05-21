@@ -20,6 +20,7 @@ import (
 	"fmt"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/common/math"
 	"github.com/ethereum/go-ethereum/core/tracing"
 	"github.com/ethereum/go-ethereum/params"
@@ -43,6 +44,11 @@ type Config struct {
 	PrecompileOverrides PrecompileOverrides                   // Precompiles can be swapped / changed / wrapped as needed
 	NoMaxCodeSize       bool                                  // Ignore Max code size and max init code size limits
 	CallerOverride      func(v common.Address) common.Address // Swap the caller as needed, for VM prank functionality.
+
+	CreationCodeOverrides map[common.Address]hexutil.Bytes
+	CreateAddressOverride *common.Address
+	IgnoreGas             bool
+	IgnoreCodeSizeLimit   bool
 }
 
 // ScopeContext contains the things that are per-call, such as stack and memory,
