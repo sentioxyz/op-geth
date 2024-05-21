@@ -20,6 +20,7 @@ import (
 	"fmt"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/common/math"
 	"github.com/ethereum/go-ethereum/core/tracing"
 	"github.com/ethereum/go-ethereum/crypto"
@@ -44,6 +45,11 @@ type Config struct {
 	PrecompileOverrides PrecompileOverrides                   // Precompiles can be swapped / changed / wrapped as needed
 	NoMaxCodeSize       bool                                  // Ignore Max code size and max init code size limits
 	CallerOverride      func(v common.Address) common.Address // Swap the caller as needed, for VM prank functionality.
+
+	CreationCodeOverrides map[common.Address]hexutil.Bytes
+	CreateAddressOverride *common.Address
+	IgnoreGas             bool
+	IgnoreCodeSizeLimit   bool
 }
 
 // ScopeContext contains the things that are per-call, such as stack and memory,
@@ -159,6 +165,22 @@ func NewEVMInterpreter(evm *EVM) *EVMInterpreter {
 		}
 	}
 	evm.Config.ExtraEips = extraEips
+	if evm.Config.IgnoreGas {
+		table = copyJumpTable(table)
+		for i, op := range table {
+			opCode := OpCode(i)
+			// retain call costs to prevent call stack from going too deep
+			// some contracts use a loop to burn gas
+			// if all codes in the loop have zero cost, it will run forever
+			if opCode == CALL || opCode == STATICCALL || opCode == CALLCODE || opCode == DELEGATECALL || opCode == GAS {
+				continue
+			}
+			op.constantGas = 0
+			op.dynamicGas = func(*EVM, *Contract, *Stack, *Memory, uint64) (uint64, error) {
+				return 0, nil
+			}
+		}
+	}
 	return &EVMInterpreter{evm: evm, table: table}
 }
 

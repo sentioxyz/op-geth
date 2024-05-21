@@ -160,13 +160,18 @@ type TraceConfig struct {
 	// Config specific to given tracer. Note struct logger
 	// config are historically embedded in main object.
 	TracerConfig json.RawMessage
+
+	StateOverrides        *override.StateOverride
+	IgnoreGas             *bool
+	IgnoreCodeSizeLimit   *bool
+	CreationCodeOverrides map[common.Address]hexutil.Bytes
+	CreateAddressOverride *common.Address
 }
 
 // TraceCallConfig is the config for traceCall API. It holds one more
 // field to override the state for tracing.
 type TraceCallConfig struct {
 	TraceConfig
-	StateOverrides *override.StateOverride
 	BlockOverrides *override.BlockOverrides
 	TxIndex        *hexutil.Uint
 }
@@ -1074,8 +1079,22 @@ func (api *API) traceTx(ctx context.Context, tx *types.Transaction, message *cor
 			return nil, err
 		}
 	}
+	vmConfig := vm.Config{
+		Tracer:    tracer.Hooks,
+		NoBaseFee: true,
+	}
+	if config != nil {
+		vmConfig.CreateAddressOverride = config.CreateAddressOverride
+		vmConfig.CreationCodeOverrides = config.CreationCodeOverrides
+		if config.IgnoreCodeSizeLimit != nil {
+			vmConfig.IgnoreCodeSizeLimit = *config.IgnoreCodeSizeLimit
+		}
+		if config.IgnoreGas != nil {
+			vmConfig.IgnoreGas = *config.IgnoreGas
+		}
+	}
 	tracingStateDB := state.NewHookedState(statedb, tracer.Hooks)
-	evm := vm.NewEVM(vmctx, tracingStateDB, api.backend.ChainConfig(), vm.Config{Tracer: tracer.Hooks, NoBaseFee: true})
+	evm := vm.NewEVM(vmctx, tracingStateDB, api.backend.ChainConfig(), vmConfig)
 	if precompiles != nil {
 		evm.SetPrecompiles(precompiles)
 	}
@@ -1172,7 +1191,7 @@ func overrideConfig(original *params.ChainConfig, override *params.ChainConfig) 
 
 type Bundle struct {
 	Transactions  []*ethapi.TransactionArgs `json:"transactions"`
-	BlockOverride ethapi.BlockOverrides     `json:"blockOverride"`
+	BlockOverride override.BlockOverrides   `json:"blockOverride"`
 }
 
 type StateContext struct {
@@ -1258,8 +1277,9 @@ func (api *API) traceBundle(ctx context.Context, bundle *Bundle, simulateContext
 	}
 	// Execute the trace
 	for idx, args := range bundle.Transactions {
-		if err := args.CallDefaults(api.backend.RPCGasCap(), vmctx.BaseFee, api.backend.ChainConfig().ChainID); err != nil {
-			return nil, err
+		if args.Gas == nil {
+			gasCap := api.backend.RPCGasCap()
+			args.Gas = (*hexutil.Uint64)(&gasCap)
 		}
 		msg := args.ToMessage(block.BaseFee(), true, true)
 		tx := args.ToTransaction(types.LegacyTxType)
