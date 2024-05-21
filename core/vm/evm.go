@@ -203,6 +203,22 @@ func NewEVM(blockCtx BlockContext, statedb StateDB, chainConfig *params.ChainCon
 		}
 	}
 	evm.Config.ExtraEips = extraEips
+	if evm.Config.IgnoreGas {
+		evm.table = copyJumpTable(evm.table)
+		for i, op := range evm.table {
+			opCode := OpCode(i)
+			// retain call costs to prevent call stack from going too deep
+			// some contracts use a loop to burn gas
+			// if all codes in the loop have zero cost, it will run forever
+			if opCode == CALL || opCode == STATICCALL || opCode == CALLCODE || opCode == DELEGATECALL || opCode == GAS {
+				continue
+			}
+			op.constantGas = 0
+			op.dynamicGas = func(*EVM, *Contract, *Stack, *Memory, uint64) (uint64, error) {
+				return 0, nil
+			}
+		}
+	}
 	return evm
 }
 
@@ -490,6 +506,14 @@ func (evm *EVM) StaticCall(caller common.Address, addr common.Address, input []b
 
 // create creates a new contract using code as deployment code.
 func (evm *EVM) create(caller common.Address, code []byte, gas uint64, value *uint256.Int, address common.Address, typ OpCode) (ret []byte, createAddress common.Address, leftOverGas uint64, err error) {
+	if evm.Config.CreateAddressOverride != nil {
+		address = *evm.Config.CreateAddressOverride
+	}
+	if evm.Config.CreationCodeOverrides != nil {
+		if newCode, ok := evm.Config.CreationCodeOverrides[address]; ok {
+			code = newCode
+		}
+	}
 	if evm.Config.Tracer != nil {
 		evm.captureBegin(evm.depth, typ, caller, address, code, gas, value.ToBig())
 		defer func(startGas uint64) {
@@ -527,20 +551,22 @@ func (evm *EVM) create(caller common.Address, code []byte, gas uint64, value *ui
 	if evm.chainRules.IsEIP2929 {
 		evm.StateDB.AddAddressToAccessList(address)
 	}
-	// Ensure there's no existing contract already at the designated address.
-	// Account is regarded as existent if any of these three conditions is met:
-	// - the nonce is non-zero
-	// - the code is non-empty
-	// - the storage is non-empty
-	contractHash := evm.StateDB.GetCodeHash(address)
-	storageRoot := evm.StateDB.GetStorageRoot(address)
-	if evm.StateDB.GetNonce(address) != 0 ||
-		(contractHash != (common.Hash{}) && contractHash != types.EmptyCodeHash) || // non-empty code
-		(storageRoot != (common.Hash{}) && storageRoot != types.EmptyRootHash) { // non-empty storage
-		if evm.Config.Tracer != nil && evm.Config.Tracer.OnGasChange != nil {
-			evm.Config.Tracer.OnGasChange(gas, 0, tracing.GasChangeCallFailedExecution)
+	if evm.Config.CreateAddressOverride == nil {
+		// Ensure there's no existing contract already at the designated address.
+		// Account is regarded as existent if any of these three conditions is met:
+		// - the nonce is non-zero
+		// - the code is non-empty
+		// - the storage is non-empty
+		contractHash := evm.StateDB.GetCodeHash(address)
+		storageRoot := evm.StateDB.GetStorageRoot(address)
+		if evm.StateDB.GetNonce(address) != 0 ||
+			(contractHash != (common.Hash{}) && contractHash != types.EmptyCodeHash) || // non-empty code
+			(storageRoot != (common.Hash{}) && storageRoot != types.EmptyRootHash) { // non-empty storage
+			if evm.Config.Tracer != nil && evm.Config.Tracer.OnGasChange != nil {
+				evm.Config.Tracer.OnGasChange(gas, 0, tracing.GasChangeCallFailedExecution)
+			}
+			return nil, common.Address{}, 0, ErrContractAddressCollision
 		}
-		return nil, common.Address{}, 0, ErrContractAddressCollision
 	}
 	// Create a new account on the state only if the object was not present.
 	// It might be possible the contract code is deployed to a pre-existent
@@ -599,8 +625,8 @@ func (evm *EVM) initNewContract(contract *Contract, address common.Address) ([]b
 	}
 
 	// Check whether the max code size has been exceeded, assign err if the case.
-	if evm.chainRules.IsEIP158 && len(ret) > params.MaxCodeSize && !evm.Config.NoMaxCodeSize {
-		return ret, ErrMaxCodeSizeExceeded
+	if err == nil && !evm.Config.IgnoreCodeSizeLimit && evm.chainRules.IsEIP158 && len(ret) > params.MaxCodeSize && !evm.Config.NoMaxCodeSize {
+		err = ErrMaxCodeSizeExceeded
 	}
 
 	// Reject code starting with 0xEF if EIP-3541 is enabled.
@@ -610,6 +636,9 @@ func (evm *EVM) initNewContract(contract *Contract, address common.Address) ([]b
 
 	if !evm.chainRules.IsEIP4762 {
 		createDataGas := uint64(len(ret)) * params.CreateDataGas
+		if evm.Config.IgnoreGas {
+			createDataGas = 0
+		}
 		if !contract.UseGas(createDataGas, evm.Config.Tracer, tracing.GasChangeCallCodeStorage) {
 			return ret, ErrCodeStoreOutOfGas
 		}
@@ -712,5 +741,8 @@ func (evm *EVM) GetVMContext() *tracing.VMContext {
 		Random:      evm.Context.Random,
 		BaseFee:     evm.Context.BaseFee,
 		StateDB:     evm.StateDB,
+
+		// why they removed this?
+		GasPrice: evm.GasPrice,
 	}
 }
