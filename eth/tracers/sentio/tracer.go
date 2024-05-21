@@ -33,6 +33,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/vm"
 	"github.com/ethereum/go-ethereum/eth/tracers"
 	"github.com/ethereum/go-ethereum/log"
+	"github.com/ethereum/go-ethereum/params"
 	"github.com/holiman/uint256"
 )
 
@@ -123,6 +124,7 @@ type Receipt struct {
 type sentioTracer struct {
 	config            sentioTracerConfig
 	env               *tracing.VMContext
+	chainConfig       *params.ChainConfig
 	activePrecompiles []common.Address // Updated on CaptureStart based on given rules
 
 	functionMap map[string]map[uint64]functionInfo
@@ -173,7 +175,7 @@ func (t *sentioTracer) CaptureStart(env *tracing.VMContext, tx *types.Transactio
 		t.receipt.TransactionIndex = uint(ibs.TxIndex())
 	}
 
-	rules := env.ChainConfig.Rules(env.BlockNumber, env.Random != nil, env.Time)
+	rules := t.chainConfig.Rules(env.BlockNumber, env.Random != nil, env.Time)
 	t.activePrecompiles = vm.ActivePrecompiles(rules)
 
 	root := Trace{
@@ -572,7 +574,7 @@ func (t *sentioTracer) Stop(err error) {
 	atomic.StoreUint32(&t.interrupt, 1)
 }
 
-func NewSentioTracer(ctx *tracers.Context, cfg json.RawMessage) (*tracers.Tracer, error) {
+func NewSentioTracer(ctx *tracers.Context, cfg json.RawMessage, chainConfig *params.ChainConfig) (*tracers.Tracer, error) {
 	//if name != "sentioTracer" {
 	//	return nil, errors.New("no tracer found")
 	//}
@@ -613,6 +615,7 @@ func NewSentioTracer(ctx *tracers.Context, cfg json.RawMessage) (*tracers.Tracer
 		functionMap: functionMap,
 		callMap:     callMap,
 		entryPc:     map[uint64]bool{},
+		chainConfig: chainConfig,
 	}
 	return &tracers.Tracer{
 		Hooks: &tracing.Hooks{
