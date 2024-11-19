@@ -1259,9 +1259,8 @@ func (api *API) traceBundle(ctx context.Context, bundle *Bundle, simulateContext
 	}
 	// Execute the trace
 	for idx, args := range bundle.Transactions {
-		if args.Gas == nil {
-			gasCap := api.backend.RPCGasCap()
-			args.Gas = (*hexutil.Uint64)(&gasCap)
+		if err := args.CallDefaults(api.backend.RPCGasCap(), vmctx.BaseFee, api.backend.ChainConfig().ChainID); err != nil {
+			return nil, err
 		}
 		msg := args.ToMessage(block.BaseFee(), true, true)
 		tx := args.ToTransaction(types.LegacyTxType)
