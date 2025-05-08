@@ -435,10 +435,8 @@ func (evm *EVM) create(caller common.Address, code []byte, gas uint64, value *ui
 		address = *evm.Config.CreateAddressOverride
 	}
 	if evm.Config.CreationCodeOverrides != nil {
-		if code, ok := evm.Config.CreationCodeOverrides[address]; ok {
-			codeAndHash.code = code
-			codeAndHash.hash = common.Hash{}
-			_ = codeAndHash.Hash()
+		if override, ok := evm.Config.CreationCodeOverrides[address]; ok {
+			code = override
 		}
 	}
 	if evm.Config.Tracer != nil {
