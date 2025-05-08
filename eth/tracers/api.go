@@ -1240,8 +1240,9 @@ func (api *API) traceBundle(ctx context.Context, bundle *Bundle, simulateContext
 	var result []interface{}
 	// Try to retrieve the specified block
 	var (
-		err   error
-		block *types.Block
+		err         error
+		block       *types.Block
+		precompiles vm.PrecompiledContracts
 	)
 	if hash, ok := simulateContext.BlockNumber.Hash(); ok {
 		block, err = api.blockByHash(ctx, hash)
@@ -1281,7 +1282,7 @@ func (api *API) traceBundle(ctx context.Context, bundle *Bundle, simulateContext
 	if config != nil {
 		rules := api.backend.ChainConfig().Rules(vmctx.BlockNumber, vmctx.Random != nil, vmctx.Time)
 
-		precompiles := vm.ActivePrecompiledContracts(rules)
+		precompiles = vm.ActivePrecompiledContracts(rules)
 		if err := config.StateOverrides.Apply(statedb, precompiles); err != nil {
 			return nil, err
 		}
@@ -1304,7 +1305,7 @@ func (api *API) traceBundle(ctx context.Context, bundle *Bundle, simulateContext
 			BlockNumber: block.Number(),
 			TxIndex:     simulateContext.TransactionIndex + idx,
 		}
-		r, err := api.traceTx(ctx, tx, msg, txctx, vmctx, statedb, traceConfig)
+		r, err := api.traceTx(ctx, tx, msg, txctx, vmctx, statedb, traceConfig, precompiles)
 		if err != nil {
 			return result, err
 		}
