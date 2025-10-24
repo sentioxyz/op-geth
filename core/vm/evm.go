@@ -551,23 +551,26 @@ func (evm *EVM) create(caller common.Address, code []byte, gas uint64, value *ui
 	if evm.chainRules.IsEIP2929 {
 		evm.StateDB.AddAddressToAccessList(address)
 	}
-	if evm.Config.CreateAddressOverride == nil {
-		// Ensure there's no existing contract already at the designated address.
-		// Account is regarded as existent if any of these three conditions is met:
-		// - the nonce is non-zero
-		// - the code is non-empty
-		// - the storage is non-empty
-		contractHash := evm.StateDB.GetCodeHash(address)
-		storageRoot := evm.StateDB.GetStorageRoot(address)
-		if evm.StateDB.GetNonce(address) != 0 ||
-			(contractHash != (common.Hash{}) && contractHash != types.EmptyCodeHash) || // non-empty code
-			(storageRoot != (common.Hash{}) && storageRoot != types.EmptyRootHash) { // non-empty storage
-			if evm.Config.Tracer != nil && evm.Config.Tracer.OnGasChange != nil {
-				evm.Config.Tracer.OnGasChange(gas, 0, tracing.GasChangeCallFailedExecution)
-			}
-			return nil, common.Address{}, 0, ErrContractAddressCollision
-		}
+	// Ensure there's no existing contract already at the designated address.
+	// Account is regarded as existent if any of these three conditions is met:
+	// - the nonce is non-zero
+	// - the code is non-empty
+	// - the storage is non-empty
+	contractHash := evm.StateDB.GetCodeHash(address)
+	storageRoot := evm.StateDB.GetStorageRoot(address)
+	if evm.Config.CreateAddressOverride != nil {
+		goto ignoreContractAddressCollision
 	}
+	if evm.StateDB.GetNonce(address) != 0 ||
+		(contractHash != (common.Hash{}) && contractHash != types.EmptyCodeHash) || // non-empty code
+		(storageRoot != (common.Hash{}) && storageRoot != types.EmptyRootHash) { // non-empty storage
+		if evm.Config.Tracer != nil && evm.Config.Tracer.OnGasChange != nil {
+			evm.Config.Tracer.OnGasChange(gas, 0, tracing.GasChangeCallFailedExecution)
+		}
+		return nil, common.Address{}, 0, ErrContractAddressCollision
+	}
+
+ignoreContractAddressCollision:
 	// Create a new account on the state only if the object was not present.
 	// It might be possible the contract code is deployed to a pre-existent
 	// account with non-zero balance.
@@ -624,11 +627,15 @@ func (evm *EVM) initNewContract(contract *Contract, address common.Address) ([]b
 		return ret, err
 	}
 
+	if evm.Config.IgnoreCodeSizeLimit {
+		goto ignoreCodeSizeLimit
+	}
 	// Check whether the max code size has been exceeded, assign err if the case.
-	if !evm.Config.IgnoreCodeSizeLimit && evm.chainRules.IsEIP158 && len(ret) > params.MaxCodeSize && !evm.Config.NoMaxCodeSize {
+	if evm.chainRules.IsEIP158 && len(ret) > params.MaxCodeSize && !evm.Config.NoMaxCodeSize {
 		return ret, ErrMaxCodeSizeExceeded
 	}
 
+ignoreCodeSizeLimit:
 	// Reject code starting with 0xEF if EIP-3541 is enabled.
 	if len(ret) >= 1 && ret[0] == 0xEF && evm.chainRules.IsLondon {
 		return ret, ErrInvalidCode
