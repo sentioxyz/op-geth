@@ -43,11 +43,12 @@ type Storage map[common.Hash]common.Hash
 
 // Config are the configuration options for structured logger the EVM
 type Config struct {
-	EnableMemory            bool // enable memory capture
-	DisableStack            bool // disable stack capture
-	DisableStorage          bool // disable storage capture
-	EnableReturnData        bool // enable return data capture
-	Limit                   int  // maximum size of output, but zero means unlimited
+	EnableMemory     bool // enable memory capture
+	DisableStack     bool // disable stack capture
+	DisableStorage   bool // disable storage capture
+	EnableReturnData bool // enable return data capture
+	Limit            int  // maximum size of output, but zero means unlimited
+
 	MemoryCompressionWindow int
 	// Chain overrides, can be used to execute a trace using future fork rules
 	Overrides *params.ChainConfig `json:"overrides,omitempty"`
@@ -63,7 +64,6 @@ type StructLog struct {
 	Gas           uint64                      `json:"gas"`
 	GasCost       uint64                      `json:"gasCost"`
 	Memory        []byte                      `json:"memory,omitempty"`
-	Meq           *int                        `json:"meq,omitempty"`
 	MemorySize    int                         `json:"memSize"`
 	Stack         []uint256.Int               `json:"stack"`
 	ReturnData    []byte                      `json:"returnData,omitempty"`
@@ -71,6 +71,8 @@ type StructLog struct {
 	Depth         int                         `json:"depth"`
 	RefundCounter uint64                      `json:"refund"`
 	Err           error                       `json:"-"`
+
+	Meq *int `json:"meq,omitempty"`
 }
 
 // overrides for gencodec
@@ -78,11 +80,12 @@ type structLogMarshaling struct {
 	Gas         math.HexOrDecimal64
 	GasCost     math.HexOrDecimal64
 	Memory      hexutil.Bytes
-	Meq         *int `json:"meq,omitempty"`
 	ReturnData  hexutil.Bytes
 	Stack       []hexutil.U256
 	OpName      string `json:"opName"`          // adds call to OpName() in MarshalJSON
 	ErrorString string `json:"error,omitempty"` // adds call to ErrorString() in MarshalJSON
+
+	Meq *int `json:"meq,omitempty"`
 }
 
 // OpName formats the operand name in a human-readable format.
@@ -289,7 +292,7 @@ func (l *StructLogger) OnOpcode(pc uint64, opcode byte, gas, cost uint64, scope 
 		stack        = scope.StackData()
 		stackLen     = len(stack)
 	)
-	log := StructLog{pc, op, gas, cost, nil, nil, len(memory), nil, nil, nil, depth, l.env.StateDB.GetRefund(), err}
+	log := StructLog{pc, op, gas, cost, nil, len(memory), nil, nil, nil, depth, l.env.StateDB.GetRefund(), err, nil}
 	if l.cfg.EnableMemory {
 		log.Memory = memory
 		var mem []byte

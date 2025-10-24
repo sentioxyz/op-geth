@@ -22,7 +22,6 @@ func (s StructLog) MarshalJSON() ([]byte, error) {
 		Gas           math.HexOrDecimal64         `json:"gas"`
 		GasCost       math.HexOrDecimal64         `json:"gasCost"`
 		Memory        hexutil.Bytes               `json:"memory,omitempty"`
-		Meq           *int                        `json:"meq,omitempty"`
 		MemorySize    int                         `json:"memSize"`
 		Stack         []hexutil.U256              `json:"stack"`
 		ReturnData    hexutil.Bytes               `json:"returnData,omitempty"`
@@ -32,6 +31,8 @@ func (s StructLog) MarshalJSON() ([]byte, error) {
 		Err           error                       `json:"-"`
 		OpName        string                      `json:"opName"`
 		ErrorString   string                      `json:"error,omitempty"`
+
+		Meq *int `json:"meq,omitempty"`
 	}
 	var enc StructLog
 	enc.Pc = s.Pc
@@ -65,7 +66,6 @@ func (s *StructLog) UnmarshalJSON(input []byte) error {
 		Gas           *math.HexOrDecimal64        `json:"gas"`
 		GasCost       *math.HexOrDecimal64        `json:"gasCost"`
 		Memory        *hexutil.Bytes              `json:"memory,omitempty"`
-		Meq           *int                        `json:"meq,omitempty"`
 		MemorySize    *int                        `json:"memSize"`
 		Stack         []hexutil.U256              `json:"stack"`
 		ReturnData    *hexutil.Bytes              `json:"returnData,omitempty"`
@@ -73,6 +73,8 @@ func (s *StructLog) UnmarshalJSON(input []byte) error {
 		Depth         *int                        `json:"depth"`
 		RefundCounter *uint64                     `json:"refund"`
 		Err           error                       `json:"-"`
+
+		Meq *int `json:"meq,omitempty"`
 	}
 	var dec StructLog
 	if err := json.Unmarshal(input, &dec); err != nil {
