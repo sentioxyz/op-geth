@@ -147,7 +147,12 @@ func (t *sentioTracer) CaptureTxEnd(receipt *types.Receipt, err error) {
 		return
 	}
 	if receipt == nil {
-		panic("tx success but receipt is nil")
+		// A tracer must never take down the node's RPC handler. A nil receipt on
+		// an otherwise-successful tx is unexpected, but it also occurs when this
+		// deferred hook runs while a panic from an earlier opcode hook unwinds
+		// the stack (err is nil there too). Skip finalisation instead of
+		// panicking, which would mask the original failure.
+		return
 	}
 	if len(t.callstack) == 0 {
 		return
@@ -170,7 +175,11 @@ func (t *sentioTracer) CaptureStart(env *tracing.VMContext, tx *types.Transactio
 	// TODO this current will block the tracer
 
 	// TODO bockHash & txHash
-	t.receipt.Nonce = env.StateDB.GetNonce(from) - 1
+	// OnTxStart fires before the sender's nonce is bumped, so GetNonce already
+	// returns this transaction's nonce. (The old pre-hook tracer API ran after
+	// the bump, hence the historical `- 1`, which now underflows for an
+	// account's first transaction.)
+	t.receipt.Nonce = env.StateDB.GetNonce(from)
 	if ibs, ok := env.StateDB.(*corestate.StateDB); ok {
 		t.receipt.TransactionIndex = uint(ibs.TxIndex())
 	}
@@ -522,8 +531,9 @@ func (t *sentioTracer) CaptureState(pc uint64, opByte byte, gas, cost uint64, sc
 		}
 		logOffset := stackBack(0)
 		logSize := stackBack(1)
-		output := scope.MemoryData()[logOffset.Uint64() : logOffset.Uint64()+logSize.Uint64()]
-		//data := copyMemory(logOffset, logSize)
+		// Bounds-safe copy: the REVERT data region may lie past the
+		// not-yet-expanded memory at hook time (see copyMemory).
+		output := copyMemory(scope.MemoryData(), logOffset.Uint64(), logSize.Uint64())
 
 		trace := mergeBase(Trace{
 			Output: output,
@@ -691,9 +701,18 @@ func (f *Trace) processError(output []byte, err error) {
 }
 
 func copyMemory(m []byte, offset uint64, size uint64) hexutil.Bytes {
-	// it's important to get copy
+	// it's important to get a copy.
+	//
+	// The opcode hook fires before the current opcode's memory expansion, so the
+	// requested [offset, offset+size) range can extend past the currently
+	// allocated memory. Copy whatever is available and leave the remainder
+	// zero-filled, matching the zero-initialised memory the EVM would expand to.
+	// A raw m[offset:offset+size] slice here panics with "slice bounds out of
+	// range" and takes down the node's RPC handler.
 	res := make([]byte, size)
-	copy(res, m[offset:offset+size])
+	if offset < uint64(len(m)) {
+		copy(res, m[offset:])
+	}
 	return res
 }
 

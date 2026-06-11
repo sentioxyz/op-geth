@@ -105,40 +105,33 @@ func newSentioPrestateTracer(ctx *tracers.Context, cfg json.RawMessage, chainCon
 
 // CaptureStart implements the EVMLogger interface to initialize the tracing operation.
 func (t *sentioPrestateTracer) CaptureStart(env *tracing.VMContext, tx *types.Transaction, from common.Address) {
-	var to common.Address
-	value := tx.Value()
-
-	// TODO need to test this
-	create := true
-	if tx.To() != nil {
-		to = *tx.To()
-		create = false
-	}
-
 	t.env = env
-	t.create = create
-	t.to = to
 	t.gasLimit = tx.Gas()
 
+	if tx.To() == nil {
+		// Contract creation: the created account's address is derived from the
+		// sender and its current nonce. OnTxStart fires before the nonce bump,
+		// so GetNonce returns the value the creation address is computed from.
+		t.create = true
+		t.to = crypto.CreateAddress(from, env.StateDB.GetNonce(from))
+	} else {
+		t.create = false
+		t.to = *tx.To()
+	}
+
 	t.lookupAccount(from)
-	t.lookupAccount(to)
+	t.lookupAccount(t.to)
 	t.lookupAccount(env.Coinbase)
 
-	// The recipient balance includes the value transferred.
-	toBal := new(big.Int).Sub(t.pre[to].Balance, value)
-	t.pre[to].Balance = toBal
+	// OnTxStart fires before any state change (gas purchase, nonce bump, value
+	// transfer), so the accounts just looked up already hold their true pre-tx
+	// balances and nonce — no rewind is required. The previous rewind logic was
+	// carried over from the old (pre-hook) tracer API, where CaptureStart ran
+	// after those state changes; under the hook API it both dereferenced the
+	// now-nil env.GasPrice and produced wrong pre-state balances/nonce.
 
-	// The sender balance is after reducing: value and gasLimit.
-	// We need to re-add them to get the pre-tx balance.
-	fromBal := new(big.Int).Set(t.pre[from].Balance)
-	gasPrice := env.GasPrice
-	consumedGas := new(big.Int).Mul(gasPrice, new(big.Int).SetUint64(t.gasLimit))
-	fromBal.Add(fromBal, new(big.Int).Add(value, consumedGas))
-	t.pre[from].Balance = fromBal
-	t.pre[from].Nonce--
-
-	if create && t.config.DiffMode {
-		t.created[to] = true
+	if t.create && t.config.DiffMode {
+		t.created[t.to] = true
 	}
 }
 
