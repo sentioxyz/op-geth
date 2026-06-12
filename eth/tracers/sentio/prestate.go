@@ -60,17 +60,18 @@ type accountMarshaling struct {
 }
 
 type sentioPrestateTracer struct {
-	env       *tracing.VMContext
-	pre       state
-	post      state
-	create    bool
-	to        common.Address
-	gasLimit  uint64 // Amount of gas bought for the whole tx
-	config    prestateTracerConfig
-	interrupt uint32 // Atomic flag to signal execution interruption
-	reason    error  // Textual reason for the interruption
-	created   map[common.Address]bool
-	deleted   map[common.Address]bool
+	env         *tracing.VMContext
+	chainConfig *params.ChainConfig
+	pre         state
+	post        state
+	create      bool
+	to          common.Address
+	gasLimit    uint64 // Amount of gas bought for the whole tx
+	config      prestateTracerConfig
+	interrupt   uint32 // Atomic flag to signal execution interruption
+	reason      error  // Textual reason for the interruption
+	created     map[common.Address]bool
+	deleted     map[common.Address]bool
 }
 
 type prestateTracerConfig struct {
@@ -85,11 +86,12 @@ func newSentioPrestateTracer(ctx *tracers.Context, cfg json.RawMessage, chainCon
 		}
 	}
 	t := &sentioPrestateTracer{
-		pre:     state{},
-		post:    state{},
-		config:  config,
-		created: make(map[common.Address]bool),
-		deleted: make(map[common.Address]bool),
+		chainConfig: chainConfig,
+		pre:         state{},
+		post:        state{},
+		config:      config,
+		created:     make(map[common.Address]bool),
+		deleted:     make(map[common.Address]bool),
 	}
 	return &tracers.Tracer{
 		Hooks: &tracing.Hooks{
@@ -161,8 +163,14 @@ func (t *sentioPrestateTracer) CaptureExit(depth int, output []byte, gasUsed uin
 func (t *sentioPrestateTracer) CaptureState(pc uint64, opByte byte, gas, cost uint64, scope tracing.OpContext, rData []byte, depth int, err error) {
 	stackData := scope.StackData()
 	stackLen := len(stackData)
-	caller := scope.Caller()
-	codeAddress := scope.Address() // TODO need test
+	// scope.Address() is the storage/state address of the executing frame (the
+	// pre-hook API's Contract.Address(); under DELEGATECALL/CALLCODE it stays
+	// the proxy). scope.CodeAddress() is where the code was loaded from (the
+	// old Contract.CodeAddr). Storage ops and CREATE address derivation must
+	// use the former; using scope.Caller() here mis-attributes storage to the
+	// parent frame and drops the real diffs.
+	contractAddress := scope.Address()
+	codeAddress := scope.CodeAddress()
 	op := vm.OpCode(opByte)
 	switch {
 	case stackLen >= 2 && op == vm.KECCAK256:
@@ -171,31 +179,42 @@ func (t *sentioPrestateTracer) CaptureState(pc uint64, opByte byte, gas, cost ui
 			offset := stackData[stackLen-1]
 			rawkey := copyMemory(scope.MemoryData(), offset.Uint64(), 64)
 
+			t.lookupAccount(contractAddress)
+
 			// only cares 64 bytes for mapping key
 			hashOfKey := crypto.Keccak256(rawkey)
-			t.pre[caller].MappingKeys[common.Bytes2Hex(rawkey)] = "0x" + common.Bytes2Hex(hashOfKey)
+			t.pre[contractAddress].MappingKeys[common.Bytes2Hex(rawkey)] = "0x" + common.Bytes2Hex(hashOfKey)
 
 			baseSlot := rawkey[32:]
-			t.pre[caller].CodeAddressBySlot[common.BytesToHash(baseSlot)] = &codeAddress
-			t.pre[caller].CodeAddressBySlot[common.BytesToHash(hashOfKey)] = &codeAddress
+			t.pre[contractAddress].CodeAddressBySlot[common.BytesToHash(baseSlot)] = &codeAddress
+			t.pre[contractAddress].CodeAddressBySlot[common.BytesToHash(hashOfKey)] = &codeAddress
 		}
 	case stackLen >= 1 && (op == vm.SLOAD || op == vm.SSTORE):
 		slot := common.Hash(stackData[stackLen-1].Bytes32())
-		t.pre[caller].CodeAddress = &codeAddress
-		t.pre[caller].CodeAddressBySlot[slot] = &codeAddress
-		t.lookupStorage(caller, slot)
+		t.lookupAccount(contractAddress)
+		t.pre[contractAddress].CodeAddress = &codeAddress
+		t.pre[contractAddress].CodeAddressBySlot[slot] = &codeAddress
+		t.lookupStorage(contractAddress, slot)
 	case stackLen >= 1 && (op == vm.EXTCODECOPY || op == vm.EXTCODEHASH || op == vm.EXTCODESIZE || op == vm.BALANCE || op == vm.SELFDESTRUCT):
 		addr := common.Address(stackData[stackLen-1].Bytes20())
 		t.lookupAccount(addr)
 		if op == vm.SELFDESTRUCT {
-			t.deleted[caller] = true
+			if t.chainConfig.IsCancun(t.env.BlockNumber, t.env.Time) {
+				// EIP-6780: the account survives unless created in this tx,
+				// so its diff must stay in `post`
+				if t.created[contractAddress] {
+					t.deleted[contractAddress] = true
+				}
+			} else {
+				t.deleted[contractAddress] = true
+			}
 		}
 	case stackLen >= 5 && (op == vm.DELEGATECALL || op == vm.CALL || op == vm.STATICCALL || op == vm.CALLCODE):
 		addr := common.Address(stackData[stackLen-2].Bytes20())
 		t.lookupAccount(addr)
 	case op == vm.CREATE:
-		nonce := t.env.StateDB.GetNonce(caller)
-		addr := crypto.CreateAddress(caller, nonce)
+		nonce := t.env.StateDB.GetNonce(contractAddress)
+		addr := crypto.CreateAddress(contractAddress, nonce)
 		t.lookupAccount(addr)
 		t.created[addr] = true
 	case stackLen >= 4 && op == vm.CREATE2:
@@ -204,7 +223,7 @@ func (t *sentioPrestateTracer) CaptureState(pc uint64, opByte byte, gas, cost ui
 		init := copyMemory(scope.MemoryData(), offset.Uint64(), size.Uint64())
 		inithash := crypto.Keccak256(init)
 		salt := stackData[stackLen-4]
-		addr := crypto.CreateAddress2(caller, salt.Bytes32(), inithash)
+		addr := crypto.CreateAddress2(contractAddress, salt.Bytes32(), inithash)
 		t.lookupAccount(addr)
 		t.created[addr] = true
 	}

@@ -103,6 +103,11 @@ func (ctx *ScopeContext) ContractCode() []byte {
 	return ctx.Contract.Code
 }
 
+// CodeAddress returns the address the running code was loaded from.
+func (ctx *ScopeContext) CodeAddress() common.Address {
+	return ctx.Contract.codeAddress
+}
+
 // Run loops and evaluates the contract's code with the given input data and returns
 // the return byte-slice and an error if one occurred.
 //

@@ -355,8 +355,7 @@ func (t *sentioTracer) CaptureState(pc uint64, opByte byte, gas, cost uint64, sc
 	}
 
 	contractAddress := scope.Address()
-	// TODO need test
-	codeAddress := scope.Address()
+	codeAddress := scope.CodeAddress()
 
 	switch op {
 	case vm.CALL, vm.CALLCODE:
