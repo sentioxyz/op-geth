@@ -31,10 +31,6 @@ type Contract struct {
 	caller  common.Address
 	address common.Address
 
-	// codeAddress is the address the running Code was loaded from: equal to
-	// address except under CALLCODE/DELEGATECALL, where it is the callee.
-	codeAddress common.Address
-
 	jumpDests JumpDestCache // Aggregated result of JUMPDEST analysis.
 	analysis  BitVec        // Locally cached result of JUMPDEST analysis
 
@@ -57,9 +53,8 @@ func NewContract(caller common.Address, address common.Address, value *uint256.I
 		jumpDests = newMapJumpDests()
 	}
 	return &Contract{
-		caller:      caller,
-		address:     address,
-		codeAddress: address,
+		caller:    caller,
+		address:   address,
 		jumpDests: jumpDests,
 		Gas:       gas,
 		value:     value,
@@ -163,9 +158,8 @@ func (c *Contract) Value() *uint256.Int {
 	return c.value
 }
 
-// SetCallCode sets the code of the contract and the address it was loaded from.
-func (c *Contract) SetCallCode(codeAddr common.Address, hash common.Hash, code []byte) {
+// SetCallCode sets the code of the contract,
+func (c *Contract) SetCallCode(hash common.Hash, code []byte) {
 	c.Code = code
 	c.CodeHash = hash
-	c.codeAddress = codeAddr
 }

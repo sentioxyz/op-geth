@@ -72,6 +72,7 @@ type sentioPrestateTracer struct {
 	reason      error  // Textual reason for the interruption
 	created     map[common.Address]bool
 	deleted     map[common.Address]bool
+	codeAddr    codeAddrTracker
 }
 
 type prestateTracerConfig struct {
@@ -97,12 +98,18 @@ func newSentioPrestateTracer(ctx *tracers.Context, cfg json.RawMessage, chainCon
 		Hooks: &tracing.Hooks{
 			OnTxStart: t.CaptureStart,
 			OnTxEnd:   t.CaptureTxEnd,
+			OnEnter:   t.CaptureEnter,
 			OnExit:    t.CaptureExit,
 			OnOpcode:  t.CaptureState,
 		},
 		GetResult: t.GetResult,
 		Stop:      t.Stop,
 	}, nil
+}
+
+// CaptureEnter records each frame's code address; see codeAddrTracker.
+func (t *sentioPrestateTracer) CaptureEnter(depth int, typ byte, from common.Address, to common.Address, input []byte, gas uint64, value *big.Int) {
+	t.codeAddr.onEnter(depth, to)
 }
 
 // CaptureStart implements the EVMLogger interface to initialize the tracing operation.
@@ -165,12 +172,12 @@ func (t *sentioPrestateTracer) CaptureState(pc uint64, opByte byte, gas, cost ui
 	stackLen := len(stackData)
 	// scope.Address() is the storage/state address of the executing frame (the
 	// pre-hook API's Contract.Address(); under DELEGATECALL/CALLCODE it stays
-	// the proxy). scope.CodeAddress() is where the code was loaded from (the
-	// old Contract.CodeAddr). Storage ops and CREATE address derivation must
-	// use the former; using scope.Caller() here mis-attributes storage to the
-	// parent frame and drops the real diffs.
+	// the proxy). Storage ops and CREATE address derivation must use it; using
+	// scope.Caller() here mis-attributes storage to the parent frame and drops
+	// the real diffs. The code address (the old Contract.CodeAddr) is tracked
+	// from OnEnter data, which OpContext does not expose.
 	contractAddress := scope.Address()
-	codeAddress := scope.CodeAddress()
+	codeAddress := t.codeAddr.codeAddress(depth, contractAddress)
 	op := vm.OpCode(opByte)
 	switch {
 	case stackLen >= 2 && op == vm.KECCAK256:

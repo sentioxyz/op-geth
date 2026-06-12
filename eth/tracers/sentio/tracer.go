@@ -140,6 +140,8 @@ type sentioTracer struct {
 
 	interrupt uint32 // Atomic flag to signal execution interruption
 	reason    error  // Textual reason for the interruption
+
+	codeAddr codeAddrTracker
 }
 
 func (t *sentioTracer) CaptureTxEnd(receipt *types.Receipt, err error) {
@@ -230,6 +232,10 @@ func (t *sentioTracer) captureEnd(output []byte, usedGas uint64, err error, reve
 }
 
 func (t *sentioTracer) CaptureEnter(depth int, typByte byte, from common.Address, to common.Address, input []byte, gas uint64, value *big.Int) {
+	// Record before any early return: every frame's code address must be
+	// tracked, including the root frame skipped below.
+	t.codeAddr.onEnter(depth, to)
+
 	if depth == 0 {
 		return
 	}
@@ -355,7 +361,7 @@ func (t *sentioTracer) CaptureState(pc uint64, opByte byte, gas, cost uint64, sc
 	}
 
 	contractAddress := scope.Address()
-	codeAddress := scope.CodeAddress()
+	codeAddress := t.codeAddr.codeAddress(depth, contractAddress)
 
 	switch op {
 	case vm.CALL, vm.CALLCODE:
