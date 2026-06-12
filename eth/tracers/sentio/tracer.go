@@ -31,6 +31,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/tracing"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/core/vm"
+	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/eth/tracers"
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/params"
@@ -54,6 +55,9 @@ type sentioTracerConfig struct {
 	Calls             map[string][]uint64       `json:"calls"`
 	Debug             bool                      `json:"debug"`
 	WithInternalCalls bool                      `json:"withInternalCalls"`
+	WithStorage       bool                      `json:"withStorage"`
+	WithStorageKeys   bool                      `json:"withStorageKeys"`
+	ExtraCaptureRules []string                  `json:"extraCaptureRules"`
 }
 
 func init() {
@@ -101,8 +105,20 @@ type Trace struct {
 
 	Topics []common.Hash `json:"topics,omitempty"`
 
+	// Used by sload/sstore
+	StorageAddress *common.Address `json:"storageAddress,omitempty"`
+	StorageSlot    *common.Hash    `json:"storageSlot,omitempty"`
+	StorageValue   *common.Hash    `json:"storageValue,omitempty"`
+
+	StorageKeys []StorageKey `json:"storageKeys,omitempty"`
+
 	// Only used by root
 	Traces []Trace `json:"traces,omitempty"`
+
+	// used by custom capture
+	MatchRuleIds []int         `json:"matchRuleIds,omitempty"`
+	Stack        []uint256.Int `json:"stack,omitempty"`
+	Memory       *[]string     `json:"memory,omitempty"`
 
 	// Use for internal call stack organization
 	// The jump to go into the function
@@ -111,6 +127,14 @@ type Trace struct {
 
 	// the function get called
 	function *functionInfo
+}
+
+type StorageKey struct {
+	Address     common.Address  `json:"address"`
+	CodeAddress *common.Address `json:"codeAddress"`
+	BaseSlot    common.Hash     `json:"baseSlot"`
+	KeySlot     common.Hash     `json:"keySlot"`
+	Key         common.Hash     `json:"key"`
 }
 
 type Receipt struct {
@@ -126,6 +150,7 @@ type sentioTracer struct {
 	env               *tracing.VMContext
 	chainConfig       *params.ChainConfig
 	activePrecompiles []common.Address // Updated on CaptureStart based on given rules
+	origin            common.Address
 
 	functionMap map[string]map[uint64]functionInfo
 	callMap     map[string]map[uint64]bool
@@ -140,6 +165,8 @@ type sentioTracer struct {
 
 	interrupt uint32 // Atomic flag to signal execution interruption
 	reason    error  // Textual reason for the interruption
+
+	extraCaptureRules []*Expr
 
 	codeAddr codeAddrTracker
 }
@@ -169,6 +196,7 @@ func (t *sentioTracer) CaptureTxEnd(receipt *types.Receipt, err error) {
 
 func (t *sentioTracer) CaptureStart(env *tracing.VMContext, tx *types.Transaction, from common.Address) {
 	t.gasLimit = tx.Gas()
+	t.origin = from
 	to := tx.To()
 	create := to == nil
 
@@ -236,15 +264,15 @@ func (t *sentioTracer) CaptureEnter(depth int, typByte byte, from common.Address
 	// tracked, including the root frame skipped below.
 	t.codeAddr.onEnter(depth, to)
 
-	if depth == 0 {
-		return
-	}
 	// Skip if tracing was interrupted
 	if atomic.LoadUint32(&t.interrupt) > 0 {
 		return
 	}
 
 	typ := vm.OpCode(typByte)
+	if depth == 0 && typ != vm.CREATE && typ != vm.CREATE2 {
+		return
+	}
 	if typ == vm.CALL || typ == vm.CALLCODE {
 		// After enter, make the assumped transfer as function call
 		topElementTraces := t.callstack[len(t.callstack)-1].Traces
@@ -369,7 +397,6 @@ func (t *sentioTracer) CaptureState(pc uint64, opByte byte, gas, cost uint64, sc
 		call.Gas = math.HexOrDecimal64(stackBack(0).Uint64())
 		from := scope.Address()
 		call.From = &from
-		// TODO need test
 		call.CodeAddress = &codeAddress
 		to := common.BigToAddress(stackBack(1).ToBig())
 		call.To = &to
@@ -548,7 +575,90 @@ func (t *sentioTracer) CaptureState(pc uint64, opByte byte, gas, cost uint64, sc
 			trace.Revertal = unpacked
 		}
 		t.callstack[len(t.callstack)-1].Traces = append(t.callstack[len(t.callstack)-1].Traces, trace)
+	case vm.SLOAD, vm.SSTORE:
+		if !t.config.WithStorage {
+			break
+		}
+		slot := common.Hash(stackBack(0).Bytes32())
+		var val common.Hash
+		if op == vm.SLOAD {
+			val = t.env.StateDB.GetState(contractAddress, slot)
+		} else {
+			val = stackBack(1).Bytes32()
+		}
+		trace := mergeBase(Trace{
+			StorageAddress: &contractAddress,
+			CodeAddress:    &codeAddress,
+			StorageSlot:    &slot,
+			StorageValue:   &val,
+		})
+		t.callstack[len(t.callstack)-1].Traces = append(t.callstack[len(t.callstack)-1].Traces, trace)
+	case vm.TLOAD, vm.TSTORE:
+		if !t.config.WithStorage {
+			break
+		}
+		slot := common.Hash(stackBack(0).Bytes32())
+		var val common.Hash
+		if op == vm.TLOAD {
+			val = t.env.StateDB.GetTransientState(contractAddress, slot)
+		} else {
+			val = stackBack(1).Bytes32()
+		}
+		trace := mergeBase(Trace{
+			StorageAddress: &contractAddress,
+			CodeAddress:    &codeAddress,
+			StorageSlot:    &slot,
+			StorageValue:   &val,
+		})
+		t.callstack[len(t.callstack)-1].Traces = append(t.callstack[len(t.callstack)-1].Traces, trace)
+	case vm.KECCAK256:
+		if !t.config.WithStorageKeys {
+			break
+		}
+		size := stackBack(1)
+		if size.Uint64() == 64 {
+			offset := stackBack(0)
+			rawkey := copyMemory(scope.MemoryData(), offset.Uint64(), 64)
+
+			// only cares 64 bytes for mapping key
+			hashOfKey := crypto.Keccak256(rawkey)
+			key := common.Hash(rawkey[:32])
+			baseSlot := common.Hash(rawkey[32:])
+			valueSlot := common.Hash(hashOfKey)
+			t.callstack[len(t.callstack)-1].StorageKeys = append(t.callstack[len(t.callstack)-1].StorageKeys, StorageKey{
+				Address:     contractAddress,
+				CodeAddress: &codeAddress,
+				BaseSlot:    baseSlot,
+				KeySlot:     valueSlot,
+				Key:         key,
+			})
+		}
 	default:
+		frame := &t.callstack[len(t.callstack)-1]
+		evalEnv := &EvalCtx{
+			Scope:  scope,
+			Op:     op,
+			Origin: t.origin,
+			Debug:  t.config.Debug,
+		}
+
+		var matchRuleIds []int
+		for i, rule := range t.extraCaptureRules {
+			ret, err := rule.Eval(evalEnv)
+			if err != nil {
+				continue
+			}
+			if ret == "true" {
+				matchRuleIds = append(matchRuleIds, i)
+			}
+		}
+		if len(matchRuleIds) > 0 {
+			frame.Traces = append(frame.Traces, mergeBase(Trace{
+				MatchRuleIds: matchRuleIds,
+				Stack:        copyStack(scope.StackData(), len(scope.StackData())),
+				Memory:       formatMemory(scope.MemoryData()),
+			}))
+		}
 		if !t.config.WithInternalCalls {
 			break
 		}
@@ -595,6 +705,7 @@ func NewSentioTracer(ctx *tracers.Context, cfg json.RawMessage, chainConfig *par
 	//}
 
 	var config sentioTracerConfig
+	var extraCaptureRules []*Expr
 	functionMap := map[string]map[uint64]functionInfo{}
 	callMap := map[string]map[uint64]bool{}
 
@@ -622,15 +733,22 @@ func NewSentioTracer(ctx *tracers.Context, cfg json.RawMessage, chainConfig *par
 			}
 		}
 
-		log.Info(fmt.Sprintf("create sentioTracer config with %d functions, %d calls", len(functionMap), len(callMap)))
+		for _, rule := range config.ExtraCaptureRules {
+			expr, err := ParseExpr(rule)
+			if err != nil {
+				return nil, err
+			}
+			extraCaptureRules = append(extraCaptureRules, expr)
+		}
 	}
 
 	t := &sentioTracer{
-		config:      config,
-		functionMap: functionMap,
-		callMap:     callMap,
-		entryPc:     map[uint64]bool{},
-		chainConfig: chainConfig,
+		config:            config,
+		functionMap:       functionMap,
+		callMap:           callMap,
+		entryPc:           map[uint64]bool{},
+		chainConfig:       chainConfig,
+		extraCaptureRules: extraCaptureRules,
 	}
 	return &tracers.Tracer{
 		Hooks: &tracing.Hooks{
